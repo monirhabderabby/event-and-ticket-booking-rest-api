@@ -1,8 +1,9 @@
 import { NextFunction, Request, Response } from "express";
 import jwt, { JwtPayload } from "jsonwebtoken";
 import { ENV } from "../config/env.js";
-import { prisma } from "../config/prisma.js"; // Adjust path to your Prisma client instance
+import { prisma } from "../config/prisma.js";
 import { Role } from "../generated/prisma/client.js";
+import { ApiError } from "../utils/ApiError.js";
 
 export interface AuthRequest extends Request {
   user?: {
@@ -12,35 +13,33 @@ export interface AuthRequest extends Request {
 }
 
 interface CustomJwtPayload extends JwtPayload {
-  id: string;
+  userId: string;
   role: Role;
 }
 
 export const verifyAuth = async (
   req: AuthRequest,
-  res: Response,
+  _res: Response,
   next: NextFunction,
 ): Promise<void> => {
   try {
     const authHeader = req.headers.authorization;
 
-    // 1. Check if the Authorization header exists and starts with "Bearer "
     if (!authHeader || !authHeader.startsWith("Bearer ")) {
-      res.status(401).json({ message: "Unauthorized: No token provided" });
-      return;
+      return next(new ApiError(401, "Unauthorized: No token provided"));
     }
 
-    // 2. Extract the token
     const token = authHeader.split(" ")[1];
     if (!token) {
-      res.status(401).json({ message: "Unauthorized: Invalid token format" });
-      return;
+      return next(new ApiError(401, "Unauthorized: Invalid token format"));
     }
 
-    // 3. Verify the token
     const decoded = jwt.verify(token, ENV.JWT_SECRET) as CustomJwtPayload;
 
-    // 4. Fetch the user from Prisma to ensure they still exist and have an active status
+    if (!decoded.userId) {
+      return next(new ApiError(401, "Unauthorized: Invalid token payload"));
+    }
+
     const user = await prisma.user.findUnique({
       where: { id: decoded.userId },
       select: {
@@ -51,16 +50,13 @@ export const verifyAuth = async (
     });
 
     if (!user) {
-      res.status(401).json({ message: "Unauthorized: User no longer exists" });
-      return;
+      return next(new ApiError(401, "Unauthorized: User no longer exists"));
     }
 
     if (user.status !== "active") {
-      res.status(403).json({ message: "Forbidden: Account is not active" });
-      return;
+      return next(new ApiError(403, "Forbidden: Account is not active"));
     }
 
-    // 5. Attach fresh database values to req.user
     req.user = {
       id: user.id,
       role: user.role,
@@ -68,7 +64,25 @@ export const verifyAuth = async (
 
     next();
   } catch (error) {
-    console.log(error);
-    res.status(401).json({ message: "Unauthorized: Invalid or expired token" });
+    next(error);
   }
+};
+
+export const restrictTo = (...roles: Role[]) => {
+  return (req: AuthRequest, _res: Response, next: NextFunction): void => {
+    if (!req.user) {
+      return next(new ApiError(401, "Unauthorized: Authentication required"));
+    }
+
+    if (!roles.includes(req.user.role)) {
+      return next(
+        new ApiError(
+          403,
+          "Forbidden: You do not have permission to perform this action",
+        ),
+      );
+    }
+
+    next();
+  };
 };

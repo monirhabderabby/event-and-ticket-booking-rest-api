@@ -41,6 +41,7 @@ model User {
 
   bookings Booking[]
   payments Payment[]
+  events   Event[]
 
   emailVerfication Boolean @default(false)
 
@@ -63,13 +64,18 @@ model Event {
   endTime   DateTime?
 
   description String?
+  category    String?
   status      EventStatus @default(draft)
 
   location String?
 
-  price  Int?
-  seat   Int?
-  banner String?
+  price          Int?
+  seat           Int?
+  availableSeats Int?
+  banner         String?
+
+  organizerId String? @db.ObjectId
+  organizer   User?   @relation(fields: [organizerId], references: [id])
 
   guests   Guest[]
   coupons  Coupon[]
@@ -119,7 +125,9 @@ enum BookingStatus {
 model Booking {
   id String @id @default(auto()) @map("_id") @db.ObjectId
 
-  status BookingStatus @default(pending)
+  status      BookingStatus @default(pending)
+  seatsBooked Int           @default(1)
+  totalPrice  Float         @default(0)
 
   userId String @db.ObjectId
   user   User   @relation(fields: [userId], references: [id])

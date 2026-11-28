@@ -1,10 +1,13 @@
 import cors from "cors";
-import express, { Application, NextFunction, Request, Response } from "express";
+import express, { Application, Request, Response } from "express";
 import helmet from "helmet";
 import morgan from "morgan";
+import { errorHandler } from "./middleware/error.middleware.js";
+import { authRateLimiter } from "./middleware/rateLimit.middleware.js";
 import authRoutes from "./routes/auth.routes.js";
-
-// import { userRoutes } from "./modules/user/user.routes.js";
+import bookingRoutes from "./routes/booking.routes.js";
+import eventRoutes from "./routes/event.routes.js";
+import userRoutes from "./routes/user.routes.js";
 
 const app: Application = express();
 
@@ -22,16 +25,22 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // Health check
-app.get("/health", (req: Request, res: Response) => {
+app.get("/health", (_req: Request, res: Response) => {
   res.status(200).json({
-    status: "OK",
-    timestamp: new Date().toISOString(),
+    success: true,
+    message: "Server is healthy",
+    data: {
+      status: "OK",
+      timestamp: new Date().toISOString(),
+    },
   });
 });
 
 // API routes
-// app.use("/api/v1/users", userRoutes);
-app.use("/api/auth", authRoutes);
+app.use("/api/auth", authRateLimiter, authRoutes);
+app.use("/api/users", userRoutes);
+app.use("/api/events", eventRoutes);
+app.use("/api/bookings", bookingRoutes);
 
 // 404 handler
 app.use((req: Request, res: Response) => {
@@ -42,13 +51,6 @@ app.use((req: Request, res: Response) => {
 });
 
 // Global error handler
-app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
-  console.error(err);
-
-  res.status(500).json({
-    success: false,
-    message: err.message || "Internal Server Error",
-  });
-});
+app.use(errorHandler);
 
 export default app;

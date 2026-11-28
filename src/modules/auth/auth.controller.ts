@@ -1,114 +1,107 @@
 import bcrypt from "bcryptjs";
-import { Request, Response } from "express";
+import { NextFunction, Request, Response } from "express";
 import jwt from "jsonwebtoken";
 import { ENV } from "../../config/env.js";
 import { prisma } from "../../config/prisma.js";
-import { AuthRequest } from "../../middleware/auth.middleware.js";
+import { Role } from "../../generated/prisma/client.js";
+import { sendWelcomeEmail } from "../../services/email.service.js";
+import { ApiError } from "../../utils/ApiError.js";
+import { sendResponse } from "../../utils/apiResponse.js";
+import { LoginInput, RegisterInput } from "./auth.validation.js";
 
-export const register = async (req: Request, res: Response) => {
+const safeUserSelect = {
+  id: true,
+  firstName: true,
+  lastName: true,
+  email: true,
+  phone: true,
+  role: true,
+  status: true,
+  designation: true,
+  emailVerfication: true,
+  createdAt: true,
+  updatedAt: true,
+} as const;
+
+export const register = async (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> => {
   try {
-    // 01. body theke data nibo
     const { firstName, lastName, email, password, phone, designation } =
-      req.body;
+      req.body as RegisterInput;
 
-    if (!firstName || !lastName || !email || !password || !phone) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "firstName, lastName, email, password and phone number are required",
-      });
-    }
-
-    // 02: email and phone use kore check dibo je user ta already exist kore kina
-    const exist = await prisma.user.findFirst({
+    const existingUser = await prisma.user.findFirst({
       where: {
-        OR: [{ email: email }, { phone: phone }],
+        OR: [{ email }, { phone }],
       },
+      select: { id: true, email: true, phone: true },
     });
 
-    if (exist) {
-      return res.status(400).json({
-        success: false,
-        message: "Email of Phone already registered",
-      });
+    if (existingUser) {
+      const conflictField =
+        existingUser.email === email ? "Email" : "Phone number";
+      return next(new ApiError(409, `${conflictField} is already registered`));
     }
 
-    // 03: Hash the password, then sae the user (role by default "user")
     const hashedPassword = await bcrypt.hash(password, 10);
 
     const user = await prisma.user.create({
       data: {
-        firstName: firstName,
-        lastName: lastName,
-        email: email,
-        phone: phone,
+        firstName,
+        lastName,
+        email,
+        phone,
         password: hashedPassword,
-        designation: designation,
+        role: Role.user,
+        ...(designation !== undefined ? { designation } : {}),
       },
+      select: safeUserSelect,
     });
 
-    const { password: _hidden, ...restUserDetails } = user;
+    // Non-blocking transactional welcome email
+    void sendWelcomeEmail({
+      to: user.email,
+      firstName: user.firstName,
+      lastName: user.lastName,
+    });
 
-    // 04: Return Full Response except password
-    return res.status(201).json({
-      success: true,
-      message: "Your account is created successfully ✅",
-      data: restUserDetails,
+    sendResponse(res, {
+      statusCode: 201,
+      message: "Account created successfully",
+      data: user,
     });
   } catch (error) {
-    return res.status(500).json({
-      success: false,
-      message: "Something went wrong",
-    });
+    next(error);
   }
 };
 
-export const login = async (req: Request, res: Response) => {
+export const login = async (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> => {
   try {
-    // 01. simple validation
-    const { email, password } = req.body;
+    const { email, password } = req.body as LoginInput;
 
-    if (!email || !password) {
-      return res.status(400).json({
-        success: false,
-        message: "email and password is required",
-      });
-    }
-
-    // 02: database check is account is accociated
     const user = await prisma.user.findUnique({
-      where: {
-        email: email,
-      },
+      where: { email },
     });
 
     if (!user) {
-      return res.status(400).json({
-        success: false,
-        message: "Account is not accociated with email ",
-      });
+      return next(new ApiError(401, "Invalid email or password"));
     }
-    // 03: password check
+
     const passwordMatched = await bcrypt.compare(password, user.password);
-
     if (!passwordMatched) {
-      return res.status(400).json({
-        success: false,
-        message: "Password mismatched!",
-      });
+      return next(new ApiError(401, "Invalid email or password"));
     }
 
-    // 04: account status check
-    const isActive = user.status;
-
-    if (!isActive) {
-      return res.status(400).json({
-        success: false,
-        message: "Account is not active!",
-      });
+    if (user.status !== "active") {
+      return next(new ApiError(403, "Forbidden: Account is not active"));
     }
 
-    // 05: generate a token using jsonwebtoken
     const token = jwt.sign(
       { userId: user.id, role: user.role, email: user.email },
       ENV.JWT_SECRET,
@@ -116,61 +109,18 @@ export const login = async (req: Request, res: Response) => {
         expiresIn: ENV.JWT_EXPIRES_IN as jwt.SignOptions["expiresIn"],
       },
     );
-    // 06: return the actual response
-    const { password: _hidden, ...rest } = user;
 
-    return res.status(200).json({
-      success: true,
+    const { password: _hidden, ...safeUser } = user;
+
+    sendResponse(res, {
+      statusCode: 200,
+      message: "Login successful",
       data: {
-        ...rest,
+        user: safeUser,
         token,
       },
     });
   } catch (error) {
-    return res.status(500).json({
-      success: false,
-      message: "Internal Server Error",
-    });
-  }
-};
-
-export const me = async (req: AuthRequest, res: Response) => {
-  try {
-    // 01: Grab the user id
-    const { user } = req;
-
-    if (!user?.id) {
-      return res.status(400).json({
-        success: false,
-        message: "UserId not found",
-      });
-    }
-
-    // 02: pick the data from db
-    const userData = await prisma.user.findUnique({
-      where: {
-        id: user.id,
-      },
-    });
-
-    if (!userData) {
-      return res.status(400).json({
-        success: false,
-        message: "user data not found",
-      });
-    }
-
-    const { password: _hidden, ...rest } = userData;
-
-    // 03: send response
-    return res.status(200).json({
-      success: true,
-      data: { ...rest },
-    });
-  } catch {
-    return res.status(500).json({
-      success: false,
-      message: "Internal Server Error",
-    });
+    next(error);
   }
 };
